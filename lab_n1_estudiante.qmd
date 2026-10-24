@@ -1,0 +1,313 @@
+---
+title: "Laboratorio 1 · Organización en estado **Inicial**"
+subtitle: "Escalera de Madurez de Datos — Fundación Altiplano"
+author: "Escribe aquí tu nombre"
+lang: es
+format:
+  html:
+    toc: true
+    number-sections: true
+    embed-resources: true
+execute:
+  warning: false
+  message: false
+---
+
+## El escenario
+
+La **Fundación Altiplano** lleva su base de donantes en `contactos_2024_FINAL_v3.xlsx`.
+Lo mantiene Marcela, del área de Desarrollo, en su computador. Cuando alguien necesita
+un dato, le escribe a Marcela. Cuando comunicaciones quiere un tablero, alguien exporta
+el archivo a Power BI — y el tablero se rompe cada vez que el archivo cambia.
+
+No hay dueño del dato, no hay definiciones escritas, no hay reglas de captura. Esto es
+una organización en **nivel 1 (Inicial / ad hoc)**.
+
+> **La pregunta de este laboratorio no es "¿cómo limpio este archivo?".**
+> Es: *¿qué tan confiable es este dato, qué tan lejos está de ser gobernable, y cuál es
+> el primer paso realista?* Limpiar es el medio. El diagnóstico y el plan son el fin.
+
+**Regla que no se negocia:** no modifiques el archivo de `datos/`. Todo se corrige en código.
+
+```{r setup}
+library(readxl)
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(ggplot2)
+library(knitr)
+
+RUTA <- "datos/nivel1/contactos_2024_FINAL_v3.xlsx"
+
+sin_tilde <- function(x) iconv(x, "UTF-8", "ASCII//TRANSLIT")
+vacio     <- function(x) is.na(x) | trimws(as.character(x)) == ""
+```
+
+---
+
+## Paso 1 · Abrir el archivo tal como llega
+
+```{r}
+ingenuo <- read_excel(RUTA)
+dim(ingenuo)
+names(ingenuo)[1:5]
+```
+
+**Pregunta 1.1.** Los encabezados no son encabezados. ¿Qué tiene este archivo encima de
+la tabla, y por qué es un problema para cualquier proceso automatizado?
+
+*Tu respuesta:*
+
+```{r}
+# TODO 1.2 — Vuelve a leer el archivo saltando las filas decorativas.
+#            Pista: el argumento se llama `skip`. ¿Cuántas filas hay que saltar?
+crudo <- read_excel(RUTA, skip = 4, .name_repair = "minimal")
+dim(crudo)
+names(crudo)
+```
+
+```{r}
+# Normalizamos los nombres de columna (esto ya viene resuelto)
+limpiar_nombre <- function(x) {
+  x |> sin_tilde() |> tolower() |> trimws() |>
+    str_replace_all("[^a-z0-9]+", "_") |> str_remove_all("^_+|_+$")
+}
+nombres <- limpiar_nombre(names(crudo))
+nombres[nombres == ""] <- "notas"
+names(crudo) <- nombres
+names(crudo)
+```
+
+```{r}
+# TODO 1.3 — Debajo de los datos hay OTRA tabla pegada (un resumen por ciudad),
+#            además de filas en blanco. Quédate sólo con los registros válidos.
+#            Pista: todo contacto real tiene un id con el patrón CT-#####
+datos <- crudo |> filter(!vacio(id), str_detect(id, "^CT-\\d{5}$"))
+
+cat("Filas en la hoja:", nrow(crudo), "| Registros válidos:", nrow(datos), "\n")
+```
+
+**Pregunta 1.4.** Acabas de decidir qué cuenta como "registro válido". ¿Debería esa
+decisión tomarla el analista, solo, en una línea de código? ¿Quién debería tomarla?
+
+*Tu respuesta:*
+
+---
+
+## Paso 2 · Diagnóstico de calidad
+
+No uses ningún paquete que calcule esto por ti: queremos ver la aritmética.
+
+### 2.1 Completitud
+
+```{r}
+completitud <- datos |>
+  summarise(across(everything(), ~ round(100 * mean(!vacio(.x)), 1))) |>
+  pivot_longer(everything(), names_to = "campo", values_to = "completitud_pct") |>
+  arrange(completitud_pct)
+
+kable(completitud)
+```
+
+### 2.2 Validez
+
+```{r}
+# TODO 2.2 — Completa las reglas de validez que faltan.
+validez <- datos |>
+  transmute(
+    correo_valido = str_detect(coalesce(correo, ""),
+                               "^[^@[:space:]]+@[^@[:space:]]+\\.[a-z]{2,}$")
+    # TODO: telefono_valido  -> ¿tiene 10 dígitos una vez quitas todo lo que no sea número?
+    # TODO: genero_valido    -> ¿el valor está dentro de un dominio aceptable?
+    # TODO: monto_valido     -> ¿se puede convertir a número?
+  ) |>
+  summarise(across(everything(), ~ round(100 * mean(.x), 1))) |>
+  pivot_longer(everything(), names_to = "regla", values_to = "cumple_pct")
+
+kable(validez)
+```
+
+### 2.3 Unicidad
+
+```{r}
+cat("Registros:              ", nrow(datos), "\n")
+cat("Identificadores únicos: ", n_distinct(datos$id), "\n")
+cat("IDs repetidos:          ", sum(duplicated(datos$id)), "\n")
+cat("Filas idénticas:        ", sum(duplicated(datos)), "\n")
+```
+
+```{r}
+# TODO 2.3 — Muestra dos registros que compartan ID pero tengan datos distintos.
+ids_rep <- datos |> count(id) |> filter(n > 1) |> pull(id)
+datos |> filter(id %in% head(ids_rep, 2)) |>
+  select(id, nombre_completo, telefono, ciudad) |> kable()
+```
+
+**Pregunta 2.3.** Hay dos problemas distintos aquí: filas idénticas y registros que
+comparten ID pero difieren. ¿Se resuelven igual? ¿Cuál de los dos **no** puedes
+resolver con código, y por qué?
+
+*Tu respuesta:*
+
+### 2.4 Consistencia
+
+```{r}
+# TODO 2.4 — ¿De cuántas formas distintas está escrita la ciudad? ¿Y el género?
+datos |> count(ciudad, sort = TRUE) |> head(10) |> kable()
+```
+
+**Pregunta 2.4.** El tablero de la Fundación reporta *Bogotá* varias veces como si
+fueran ciudades distintas. ¿De quién es el problema: del analista de BI, de quien
+captura el dato, o de la organización?
+
+*Tu respuesta:*
+
+---
+
+## Paso 3 · Limpieza reproducible
+
+```{r}
+# TODO 3.1 — Completa la limpieza. Te dejamos resuelto el caso de la fecha,
+#            que es el más difícil. Los demás son tuyos.
+
+meses_es <- c(ene = 1, feb = 2, mar = 3, abr = 4, may = 5, jun = 6,
+              jul = 7, ago = 8, sep = 9, oct = 10, nov = 11, dic = 12)
+
+parsear_fecha <- function(x) {
+  x <- trimws(coalesce(x, "")); salida <- as.Date(rep(NA, length(x)))
+  i <- str_detect(x, "^\\d{2}/\\d{2}/\\d{4}$"); salida[i] <- as.Date(x[i], format = "%d/%m/%Y")
+  i <- str_detect(x, "^\\d{4}-\\d{2}-\\d{2}$"); salida[i] <- as.Date(x[i], format = "%Y-%m-%d")
+  i <- str_detect(x, "^\\d{2}-[a-z]{3}-\\d{2}$")
+  if (any(i)) {
+    p <- str_split_fixed(x[i], "-", 3)
+    salida[i] <- as.Date(sprintf("20%s-%02d-%s", p[, 3], meses_es[p[, 2]], p[, 1]))
+  }
+  salida
+}
+
+limpio <- datos |>
+  transmute(
+    contacto_id     = trimws(id),
+    nombre_completo = str_squish(nombre_completo),
+    fecha_ingreso   = parsear_fecha(fecha_de_ingreso)
+    # TODO: correo   -> minúsculas, y NA si no tiene formato válido
+    # TODO: telefono -> sólo dígitos, quita el prefijo 57, NA si no quedan 10
+    # TODO: ciudad   -> unifica las variantes en un solo valor por ciudad
+    # TODO: genero   -> unifica a F / M / NA
+    # TODO: monto_ultima_donacion -> numérico
+  )
+
+cat("Registros tras limpieza:", nrow(limpio), "\n")
+```
+
+**Pregunta 3.2.** ¿Eliminaste los registros con ID repetido o los marcaste para
+revisión? Defiende tu decisión ante una directora que te pide "una base limpia para
+el viernes".
+
+*Tu respuesta:*
+
+```{r}
+# TODO 3.3 — Construye una tabla ANTES vs DESPUÉS de al menos cuatro indicadores.
+```
+
+**Pregunta 3.4.** Revisa el porcentaje de correos válidos antes y después. ¿Subió?
+¿Qué te dice eso sobre lo que la limpieza **puede** y **no puede** arreglar?
+
+*Tu respuesta:*
+
+---
+
+## Paso 4 · Diccionario de datos
+
+Este será el primer artefacto de gobierno que la Fundación tenga. Parte se genera con
+código; parte sólo la puede llenar el negocio.
+
+```{r}
+# TODO 4.1 — Genera el diccionario: campo, tipo, completitud, valores únicos, ejemplo.
+#            Añade a mano: descripcion, dominio_permitido y responsable.
+```
+
+**Pregunta 4.2.** ¿Qué columna de tu diccionario **no puedes llenar tú solo**? ¿Qué
+dice eso sobre el estado de gobierno de esta organización?
+
+*Tu respuesta:*
+
+---
+
+## Paso 5 · Plan de gobierno mínimo viable
+
+La tentación aquí es proponer un programa completo: comité de datos, política
+corporativa, catálogo, herramienta. **Una organización en nivel 1 no puede absorber
+eso.** El objetivo no es llegar al nivel 5: es llegar al **nivel 2**.
+
+```{r}
+# TODO 5.1 — Construye tu plan: entre 4 y 6 acciones, cada una con
+#            prioridad, por_que_ahora, responsable_propuesto y plazo.
+#            Al menos una debe atacar la causa EN EL ORIGEN, no el síntoma.
+```
+
+**Pregunta 5.2.** Si sólo pudieras ejecutar **una** de tus acciones, ¿cuál eliges y por qué?
+
+*Tu respuesta:*
+
+**Pregunta 5.3.** Nombra una acción que deliberadamente **dejaste fuera** por no
+corresponder al nivel de madurez de esta organización, y explica por qué.
+
+*Tu respuesta:*
+
+---
+
+## Paso 6 · Entregar el dato limpio
+
+El diagnóstico y el plan son para la organización. **El archivo limpio es para quien va a
+construir el tablero** — que esta vez eres tú mismo.
+
+```{r}
+dir.create("salidas", showWarnings = FALSE)
+
+readr::write_csv(limpio, "salidas/contactos_limpio.csv", na = "")
+
+cat("Escrito:", nrow(limpio), "registros ·",
+    ncol(limpio), "columnas  ->  salidas/contactos_limpio.csv\n")
+```
+
+**Para bajarlo:** en el panel *Files* de Posit Cloud entra a `salidas/`, marca la casilla del
+archivo y usa **More → Export…**
+
+> **Fíjate en lo que acaba de pasar.** El archivo original sigue intacto en `datos/`, sin una sola
+> modificación. Todo lo que cambió está escrito en código, en este documento, y cualquiera puede
+> volver a ejecutarlo y obtener exactamente el mismo resultado.
+>
+> **Esa es la diferencia entre arreglar un archivo y gobernar un dato.**
+
+### 6.1 · Súbelo a Tableau y compáralo
+
+Con el `.csv` descargado, en Tableau: **New → Workbook → Files → Upload from computer**.
+Arrastra **`ciudad`** a Filas, igual que hiciste con el archivo sucio.
+
+| | Archivo crudo | Tu archivo limpio |
+|---|---|---|
+| Valores distintos de ciudad | | |
+| Registros sin ciudad | | |
+| Formatos de fecha | | |
+
+**Pregunta 6.2.** Con el archivo crudo, Tableau mostraba 14 ciudades y el archivo tenía 27 grafías
+distintas, para 10 ciudades reales. ¿Cuántas muestra ahora, y por qué cambió?
+
+*Tu respuesta:*
+
+**Pregunta 6.3.** Ese `.csv` lo bajaste tú y lo subiste tú, a mano. Si mañana llega
+`contactos_2025.xlsx`, ¿qué parte de todo esto se repite sola y qué parte hay que volver a hacer a
+mano? **Esa parte manual es donde el linaje se rompe.**
+
+*Tu respuesta:*
+
+---
+
+## Entrega
+
+Haz `commit` y `push` de este `.qmd` y del `.html` renderizado. Revisa que el
+documento renderice completo antes de entregar.
+
+**El `.csv` de `salidas/` no se versiona** — está en el `.gitignore`, porque se regenera
+ejecutando el código. Ese archivo lo descargas para Tableau, no lo subes al repositorio.
